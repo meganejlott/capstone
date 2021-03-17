@@ -1,0 +1,634 @@
+---
+title: "GMPD Database"
+author: "Anecia Gentles, Emily Herring, Megan Lott, and Christina Welch"
+date: "February 15, 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE, message = FALSE, warning=FALSE}
+```
+
+*Question:* How does parasitism compare between mammalian hosts populations that are established on and off of protected lands?
+
+*Predictions:* Host populations within protected lands will have a higher diversity of parasites and increased parasitism, compared to those same host populations located outside of protected lands. Parasitism will increase with greater host species density and with smaller geographic area available. Protected lands, dedicated to the preservation of biodiversity, will have a higher host species diversity and abundance. 
+
+*Scales:* Parasitism of mammal communities on and off protected lands. Prevalence of parasite groups between hosts on and off of protected lands. 
+
+*Approach:*
+1. Examine parasitism between mammal species on and off of protected lands, by parasite diversity and prevalence. 
+2. Examine parasitism of major families of mammals: great apes (and plasmodium), deer (and ticks).  
+3. Utilize social networks to examine parasite sharing within and between hosts on and off of protected lands. 
+4. Compare parasite diversity and prevalence between protected areas of different sizes. 
+5. Control for "frequency of frequency" data by using Chao-2 Estimates
+
+*Data Sets:*
+Global Mammal Parasite Database (GMPD)
+Protected Land Data from the International Union for Conservation of Nature (IUCN): Location, Area, Preservation Classification
+Protected Lands Survey Results: Species Counts, Human Density & Impact, Demographic Information
+
+```{r include = FALSE, message = FALSE, warning=FALSE}
+#Load Libraries
+library(maps)
+library(raster)
+library(mapview)
+library(tidyverse)
+library(dplyr)
+library(sf)
+library(spatstat)
+library(sp)
+library(maps)
+library(plyr)
+library(viridis)
+library(reshape)
+library(tidyverse)
+library(ggpubr)
+library(reshape2)
+```
+
+
+```{r echo = FALSE, eval = FALSE, warning=FALSE}
+
+#This chunk is not working in my RMD, but is working in my .R script. 
+
+#Load Data 
+
+#Load in the geospatial data for protected lands. 
+#Load Data 
+#GMPD = read.csv("./GMPD.csv")
+
+#protected_areas1 = st_read("./areas/protected_areas1.shp")
+#protected_areas2 = st_read("./areas/protected_areas2.shp")
+#protected_areas3 = st_read("./areas/protected_areas3.shp")
+
+#protected_areas = rbind(protected_areas1, protected_areas2, protected_areas3)
+#protected_areas = st_as_sf(protected_areas, coords = c('Longitude', 'Latitude'))
+#protected_areas = st_transform(protected_areas,CRS("+proj=longlat"))
+
+#Filer out observations that are missing spatial data
+#GMPD = GMPD %>% filter(Longitude != "NA")
+
+#Save dataset as a simple shapefile
+#gmpd_sf = st_as_sf(GMPD, coords = c('Longitude', 'Latitude'), crs = st_crs(protected_areas))
+
+#gmpd_protected_all = st_join(gmpd_sf, protected_areas)
+#gmpd_protected_sf = gmpd_protected_all %>% filter(DESIG != "NA")
+#gmpd_nonprotected_sf = gmpd_protected_all %>% filter(is.na(DESIG))
+
+```
+
+```{r warning=FALSE}
+gmpd_sf = st_read("./gmpd_sf/gmpd_sf.shp")
+protected_areas = st_read("./protected_areas/protected_areas.shp")
+```
+
+We need to fix the gmpd column names
+```{r}
+names(gmpd_sf)[2] = "HostCorrectedName"
+names(gmpd_sf)[8] = "ParasiteCorrectedName"
+names(gmpd_sf)[13] = "Citation"
+names(gmpd_sf)[18] = "Prevalence"
+names(gmpd_sf)[19] = "HostsSampled"
+```
+
+In order to compare parasitism of mammalian hosts on & off of protected lands, we will overlay the GMPD data onto the IUCN data. We will find the intersection to identify observations that fall within protected lands. All others will be considered observations that are on "nonprotected" lands.
+
+```{r message = FALSE, warning=FALSE}
+#Now, subset the data into "Protected" vs. "Non-Protected" observations.
+gmpd_icun_all = st_join(gmpd_sf, protected_areas)
+gmpd_protected_sf = gmpd_icun_all %>% filter(DESIG != "NA")
+gmpd_nonprotected_sf = gmpd_icun_all %>% filter(is.na(DESIG))
+```
+
+
+By subsetting this data, we have 3,065 observations from the GMPD database that fall within the protected lands documented by IUCN. We have 16,557 observations that fall onto nonprotected lands. 
+
+With our investigation, we are interested in how parasitism compares between hosts that are found on and off of protected lands. Which hosts are shared between these two datasets?
+
+```{r message = FALSE, warning=FALSE}
+#Now, let's look at host species that are shared between protected & non-protected
+shared_hosts = dplyr::intersect(gmpd_protected_sf$HostCorrectedName, gmpd_nonprotected_sf$HostCorrectedName)
+shared_hosts = as.data.frame(shared_hosts)
+names(shared_hosts)[1] = "HostCorrectedName"
+```
+
+There are 150 hosts that are shared between the two datasets. Based on some preliminary investigation, we know that we are going to need to adjust our data for differences in sampling effort. Let's tally how many times each host has been studied inside & outside of protected lands. 
+
+```{r message = FALSE, warning=FALSE}
+#Let's tally the number of times each host was studied. 
+tally_protected_hosts = gmpd_protected_sf %>% group_by(HostCorrectedName) %>% tally() %>% as.data.frame() %>% select(HostCorrectedName, n)
+
+tally_nonprotected_hosts = gmpd_nonprotected_sf %>% group_by(HostCorrectedName) %>% tally() %>% as.data.frame() %>% select(HostCorrectedName, n)
+
+#change column name of n. This column includes the number of times each host was studied.
+names(tally_protected_hosts)[2] = "protected" 
+names(tally_nonprotected_hosts)[2] = "nonprotected" 
+
+summary(tally_protected_hosts)
+summary(tally_nonprotected_hosts)
+```
+
+Now, let's find out how sampling effort compared between those shared hosts on and off of protected lands. 
+
+Based on Teitelbaum et al. 2020, we are going to want to select host species that have been studied more than 15 times. 
+
+```{r message = FALSE, warning=FALSE}
+shared_hosts = left_join(shared_hosts, tally_protected_hosts)
+shared_hosts = left_join(shared_hosts, tally_nonprotected_hosts)
+
+#Select only the hosts that have more than 15 described studies (according to Titleman et al 2020)
+shared_hosts_trimmed = shared_hosts %>% filter(protected > 15) %>% filter(nonprotected > 15) %>% select(HostCorrectedName)
+
+#Now we have only 34 hosts!
+```
+
+By selecting shared host species that have been studied more than 15 times, both on and off of protected lands, we have narrowed our investigation to the comparison of 34 hosts. Who are these hosts? How many times have they been studied on and off of protected lands.
+
+```{r}
+print(shared_hosts_trimmed)
+```
+
+
+Early look: how does parasite diversity compare between protected and nonprotected hosts?
+
+```{r message = FALSE, warning=FALSE}
+#trim the gmpd subsets to include only the 34 host species.
+gmpd_protected_sf = right_join(gmpd_protected_sf, shared_hosts_trimmed)
+gmpd_nonprotected_sf = right_join(gmpd_nonprotected_sf, shared_hosts_trimmed)
+
+#Describe the habitat as "protected" vs. "nonprotected"
+gmpd_protected_sf$habitat = c("protected")
+gmpd_nonprotected_sf$habitat = c("nonprotected")
+```
+
+```{r message = FALSE, warning=FALSE}
+gmpd_trimmed = bind_rows(gmpd_protected_sf, gmpd_nonprotected_sf)
+gmpd_trimmed = as.data.frame(gmpd_trimmed)
+gmpd_trimmed$habitat = as.factor(gmpd_trimmed$habitat)
+
+```
+
+Save the gmpd_trimmed data frame.
+```{r}
+saveRDS(gmpd_trimmed, file = "./gmpd_trimmed.rds")
+```
+
+
+Now, let's go ahead and clear the global environment for a fresh start. 
+
+```{r}
+rm(list = ls())
+```
+
+We are going to start our investigation into the comparison of parasitism on and off of protected lands. 
+
+```{r}
+#Load GMPD trimmed file 
+gmpd_trimmed = readRDS(file = "gmpd_trimmed.rds")
+```
+
+
+We can visualize the "raw" number of parasite species from on & off of protected lands.
+
+```{r message = FALSE, warning=FALSE}
+#We're going to determine the number of parasites described for each of our 34 hosts. 
+
+ParDiversity = plyr::ddply(gmpd_trimmed,.(habitat, HostCorrectedName),summarise, parasite_diversity =length(unique(ParasiteCorrectedName)))
+
+ParDiversity %>% ggplot(aes(x = habitat, y = parasite_diversity)) + geom_boxplot() +
+  geom_jitter() +
+  xlab("Habitat") + 
+  ylab("Number of Parasite Species") + 
+  ggtitle("Number of Parasite Species Per Host Inside and Outside of Protected Lands")
+```
+
+At first glance, we can see that parasite species richness appears to be greater for hosts that are on non-protected lands, as opposed to protected lands.
+
+But, is this difference due to a differance in sampling effort? Now, we need to try to approximate species diversity through non-parametric estimations, based on Chao2, provided in the fossil package.
+
+```{r message = FALSE, warning=FALSE}
+#Create a dataframe for the unique hosts in the trimmed dataset (N = 34)
+h = gmpd_trimmed %>% group_by(HostCorrectedName) %>% tally() %>% as.data.frame() %>% select(HostCorrectedName)
+
+#Create a dataframe for the number of studies for each host, on and off protected lands 
+studies = gmpd_trimmed %>% group_by(HostCorrectedName, habitat) %>% tally()
+studies = studies %>% spread(habitat, n)
+
+#Quick look at the difference
+studies %>% ggplot(aes(y = protected)) + geom_boxplot() 
+studies %>% ggplot(aes(y = nonprotected)) + geom_boxplot()
+
+#write.csv(studies, "./num_studies.csv")
+
+
+```
+
+Now, we need to arrange the data in a way that can be moved through fossil.
+
+```{r message = FALSE, warning=FALSE}
+library(fossil)
+
+#Let's set up the data in the format we need for "input". 
+#We need to do this first to get an account of all parasites per host (including zeros)
+input = gmpd_trimmed %>% group_by(HostCorrectedName,  habitat, ParasiteCorrectedName) %>% 
+  tally() %>% spread(habitat, n)  %>% mutate_if(is.numeric, funs(ifelse(is.na(.), 0, .)))
+
+#separate into "on" and "off" protected lands
+input_protected = input %>% select(-nonprotected, -ParasiteCorrectedName)
+input_nonprotected = input %>% select(-protected, -ParasiteCorrectedName)
+
+
+#Now, we want to create a loop where we: 
+# 1) bind the frequency of parasites to the number of studies
+# 2) do this per host in "h"
+
+length_h = length(h[,1])
+
+#create an empty dataframe
+SR = data.frame(1:length_h)
+
+#run through each host of the protected df and determine Chao2
+for(i in 1:length_h){
+  data <- input_protected[which(input_protected$HostCorrectedName == h[i,1]), ]
+  S <- chao2(data$protected) 
+  SR[i,2] <- S
+}
+
+#run through each host of the nonprotected df and determine Chao2
+for(i in 1:length_h){
+  data <- input_nonprotected[which(input_nonprotected$HostCorrectedName == h[i,1]), ]
+  S <- chao2(data$nonprotected) 
+  SR[i,3] <- S
+}
+
+SR = dplyr::bind_cols(SR,h)
+SR =  SR %>% select(-X1.length_h)
+names(SR)[1] = "protected"
+names(SR)[2] = "nonprotected"
+
+write.csv(SR, "./Chao2_species_richness.csv")
+
+SR = reshape::melt(SR, id = "HostCorrectedName")
+
+SR %>% ggplot(aes(x = variable, y = value)) + geom_col() + facet_wrap(~HostCorrectedName) + ggtitle("Parasite Species Richness per Host, estimated by Chao2")
+
+```
+
+Let's calculate the Shannon and Simpson diversity indices, using the 'vegan' package in R. 
+
+```{r message = FALSE, warning=FALSE}
+library(vegan)
+library(here)
+library(reshape2)
+
+
+#Load data. gmpd_trimmed.csv includes GMPD data for all hosts that have at least 15 citations on and off protected lands
+gmpd.trimmed <- read.csv(here("gmpd_trimmed.csv"))
+
+#Split gmpd.trimmed into protected and nonprotected species
+gmpd.trimmed.protected <- gmpd.trimmed[which(gmpd.trimmed$habitat == "protected"),]
+gmpd.trimmed.nonprotected <- gmpd.trimmed[which(gmpd.trimmed$habitat == "nonprotected"),]
+
+#For each of these dataframes, we need to get the data into the correct format for the diversity function in vegan
+#Each row should be a unique host, and each column should be a unique parasite.
+#Each observation is a count (how many times that parasite was identified in that host)
+
+
+#Lets get a tally of each unique parasite per unique host for both protected and nonprotected lands, including zeros
+
+#protected lands
+
+protected.freq = gmpd.trimmed.protected %>% group_by(HostCorrectedName, ParasiteCorrectedName) %>% 
+  tally() %>% mutate_if(is.numeric, funs(ifelse(is.na(.), 0, .)))
+
+#nonprotected lands
+
+nonprotected.freq = gmpd.trimmed.nonprotected %>% group_by(HostCorrectedName, ParasiteCorrectedName) %>% 
+  tally() %>% mutate_if(is.numeric, funs(ifelse(is.na(.), 0, .)))
+
+#Now we need to rearrange the dataframes into the correct format
+
+protected.freq <- dcast(protected.freq, HostCorrectedName ~ ParasiteCorrectedName)
+nonprotected.freq <- dcast(nonprotected.freq, HostCorrectedName ~ ParasiteCorrectedName)
+
+protected.freq <- protected.freq %>% column_to_rownames(var="HostCorrectedName")
+nonprotected.freq <- nonprotected.freq %>% column_to_rownames(var="HostCorrectedName")
+
+#And change any "NA" values to zero
+
+protected.freq[is.na(protected.freq)] <- 0
+nonprotected.freq[is.na(nonprotected.freq)] <- 0
+
+#Now, we'll use the vegan package to calculate our diversity indices
+
+#First, shannon index
+
+shannon.index.protected <- diversity(protected.freq, index = "shannon", MARGIN = 1, base = exp(1))
+view(shannon.index.protected)
+shannon.index.protected <- as.data.frame(shannon.index.protected)
+
+shannon.index.nonprotected <- diversity(nonprotected.freq, index = "shannon", MARGIN = 1, base = exp(1))
+view(shannon.index.nonprotected)
+shannon.index.nonprotected <- as.data.frame(shannon.index.nonprotected)
+
+#Then, Simpson index
+
+simpson.index.protected <- diversity(protected.freq, index = "simpson")
+view(simpson.index.protected)
+simpson.index.protected <- as.data.frame(simpson.index.protected)
+
+simpson.index.nonprotected <- diversity(nonprotected.freq, index = "simpson")
+view(simpson.index.nonprotected)
+simpson.index.nonprotected <- as.data.frame(simpson.index.nonprotected)
+
+#And finally inverse Simpson
+
+invsimpson.index.protected <- diversity(protected.freq, index = "invsimpson")
+view(invsimpson.index.protected)
+invsimpson.index.protected <- as.data.frame(invsimpson.index.protected)
+
+invsimpson.index.nonprotected <- diversity(nonprotected.freq, index = "invsimpson")
+view(invsimpson.index.nonprotected)
+invsimpson.index.nonprotected <- as.data.frame(invsimpson.index.nonprotected)
+
+#Now we'll merge these dataframes to summarize all diversity indices for hosts on protected and nonprotected lands
+
+#Protected first
+
+diversity.indices.protected <- merge(shannon.index.protected, simpson.index.protected, by=0, all=TRUE)
+colnames(diversity.indices.protected)[1] <- "HostNameCorrected"
+
+invsimpson.index.protected <- tibble::rownames_to_column(invsimpson.index.protected, "HostNameCorrected")
+
+diversity.indices.protected <- merge(diversity.indices.protected, invsimpson.index.protected, by="HostNameCorrected", all=TRUE)
+colnames(diversity.indices.protected)[2] <- "Shannon Index"
+colnames(diversity.indices.protected)[3] <- "Simpson Index"
+colnames(diversity.indices.protected)[4] <- "Inverse Simpson Index"
+
+#Now nonprotected
+
+diversity.indices.nonprotected <- merge(shannon.index.nonprotected, simpson.index.nonprotected, by=0, all=TRUE)
+colnames(diversity.indices.nonprotected)[1] <- "HostNameCorrected"
+
+invsimpson.index.nonprotected <- tibble::rownames_to_column(invsimpson.index.nonprotected, "HostNameCorrected")
+
+diversity.indices.nonprotected <- merge(diversity.indices.nonprotected, invsimpson.index.nonprotected, by="HostNameCorrected", all=TRUE)
+colnames(diversity.indices.nonprotected)[2] <- "Shannon Index"
+colnames(diversity.indices.nonprotected)[3] <- "Simpson Index"
+colnames(diversity.indices.nonprotected)[4] <- "Inverse Simpson Index"
+
+write.csv(diversity.indices.protected, file = "diversity.indices.protected.csv", row.names = FALSE)
+write.csv(diversity.indices.nonprotected, file = "diversity.indices.nonprotected.csv", row.names = FALSE)
+
+summary(diversity.indices.protected)
+summary(diversity.indices.nonprotected)
+
+```
+
+```{r }
+#Clear the air
+rm(list = ls())
+```
+
+
+We can visualize these estimations. 
+
+```{r message = FALSE, warning=FALSE}
+library(ggpubr)
+library(reshape2)
+
+#load data
+diversity_protected = read.csv("./diversity.indices.protected.csv")
+diversity_nonprotected = read.csv("./diversity.indices.nonprotected.csv")
+Chao2 = read.csv("./Chao2_species_richness.csv")
+
+Chao2_protected = Chao2 %>% select(HostCorrectedName, protected)
+names(Chao2_protected)[1] = "HostNameCorrected"
+names(Chao2_protected)[2] = "Chao2"
+
+Chao2_nonprotected = Chao2 %>% select(HostCorrectedName, nonprotected)
+names(Chao2_nonprotected)[1] = "HostNameCorrected"
+names(Chao2_nonprotected)[2] = "Chao2"
+
+#Now, let's see if these are any different. 
+wilcox.test(Chao2_protected$Chao2, Chao2_nonprotected$Chao2, paired = TRUE)
+wilcox.test(diversity_protected$Shannon.Index, diversity_nonprotected$Shannon.Index, paired = TRUE)
+wilcox.test(diversity_protected$Simpson.Index, diversity_nonprotected$Simpson.Index, paired = TRUE)
+
+diversity_protected = left_join(diversity_protected, Chao2_protected, by = "HostNameCorrected")
+diversity_nonprotected = left_join(diversity_nonprotected, Chao2_nonprotected, by = "HostNameCorrected")
+
+diversity = bind_rows(diversity_protected, diversity_nonprotected, .id = "habitat")
+diversity$habitat = fct_recode(diversity$habitat, "Protected" = "1", "Non-Protected" = "2")
+
+write.csv(diversity, "./diversity_indices.csv")
+
+diversity_indices = melt(diversity, by = c("HostNameCorrected", "habitat"))
+
+shannon = diversity %>% ggplot(aes(x = habitat, y = Shannon.Index)) + 
+  geom_boxplot() + 
+  geom_jitter() + 
+  xlab("")  
+
+simpson = diversity %>% ggplot(aes(x = habitat, y = Simpson.Index)) + 
+  geom_boxplot() + 
+  geom_jitter() + 
+  xlab("")  
+
+
+inverse_simpson = diversity %>% ggplot(aes(x = habitat, y = Inverse.Simpson.Index)) + 
+  geom_boxplot() + 
+  geom_jitter() + 
+  xlab("")  
+
+
+Chao2 = diversity %>% ggplot(aes(x = habitat, y = Chao2)) + 
+  geom_boxplot() + 
+  geom_jitter() + 
+  xlab("")  
+
+
+diversity_index = ggarrange(Chao2, shannon, simpson, inverse_simpson)
+
+diversity_index
+
+ggsave(path = "./", filename = "diversity.index", width = 8, height = 6, device='tiff', dpi=700)
+
+```
+
+Below, we will run statastical analyses to determine if (1) the diversity indices are parametric, and (2) if the diversity indices are signifcantly different between habitats. 
+
+```{r message = FALSE, warning=FALSE}
+library(dplyr)
+library(here)
+library(ggpubr)
+
+diversity_indices <- read.csv(here("diversity_indices.csv"))
+
+#Diversity indices analysis
+
+#We're going to try to use a two-sample t-test (independent t test) to see if there are significant differences in parasite diversity for species on and off of protected lands
+
+#First we need to check the assumptions of the two-sample t-test:
+#1) Are the two samples independent?
+  # Yes, as studies conducted/samples collected on vs. off of protected areas are not related to one another
+
+#2) Do the data from each of the two groups follow a normal distribution?
+  # To test this assumption, we'll use the Shapiro-Wilk normality test
+
+with(diversity_indices, shapiro.test(Shannon.Index[habitat == "Protected"]))
+# W = 0.9589, p = 0.2258
+
+with(diversity_indices, shapiro.test(Simpson.Index[habitat == "Protected"]))
+# W = 0.8258, p = 0.00008
+
+with(diversity_indices, shapiro.test(Inverse.Simpson.Index[habitat == "Protected"]))
+# W = 0.89241, p = 0.003
+
+with(diversity_indices, shapiro.test(Chao2[habitat == "Protected"]))
+# W = 0.84265, p = 0.0002
+
+with(diversity_indices, shapiro.test(Shannon.Index[habitat == "Non-Protected"]))
+# W = 0.97291, p = 0.546
+
+with(diversity_indices, shapiro.test(Simpson.Index[habitat == "Non-Protected"]))
+# W = 0.77457, p = 0.000009
+
+with(diversity_indices, shapiro.test(Inverse.Simpson.Index[habitat == "Non-Protected"]))
+# W = 0.92047, p = 0.017
+
+with(diversity_indices, shapiro.test(Chao2[habitat == "Non-Protected"]))
+# W = 0.87339, p = 0.00098
+
+#For both the protected and nonprotected groups, the Shannon Index is normally distributed, while all other diversity indices are not
+
+#Lets visualize these data in a Q-Q plot as well
+
+with(diversity_indices, ggqqplot(Shannon.Index[habitat == "Protected"]))
+
+with(diversity_indices, ggqqplot(Simpson.Index[habitat == "Protected"]))
+
+with(diversity_indices, ggqqplot(Inverse.Simpson.Index[habitat == "Protected"]))
+
+with(diversity_indices, ggqqplot(Chao2[habitat == "Protected"]))
+
+with(diversity_indices, ggqqplot(Shannon.Index[habitat == "Non-Protected"]))
+
+with(diversity_indices, ggqqplot(Simpson.Index[habitat == "Non-Protected"]))
+
+with(diversity_indices, ggqqplot(Inverse.Simpson.Index[habitat == "Non-Protected"]))
+
+with(diversity_indices, ggqqplot(Chao2[habitat == "Non-Protected"]))
+
+#We also need to check for homogeneity of variance.
+
+#Because the Shannon index is approximately normally distributed, we'll use the Fisher F-test
+
+var.test(Shannon.Index ~ habitat, data = diversity_indices)
+
+#p = 0.04847
+
+#For the other diversity indices, which are not normally distributed, we'll use the Fligner-Killeen test
+
+fligner.test(Simpson.Index ~ habitat, diversity_indices)
+
+#p = 0.0004
+
+fligner.test(Inverse.Simpson.Index ~ habitat, diversity_indices)
+
+#p = 0.9073
+
+fligner.test(Chao2 ~ habitat, diversity_indices)
+
+#p = 0.09382
+
+#Let's try the Fligner-Killeen test for Shannon Index as well
+fligner.test(Shannon.Index ~ habitat, diversity_indices)
+
+#p = 0.01653
+
+#Shannon Index and Simpson Index do not meet the assumption of equal variance 
+
+#For Inverse Simpson Index and Chao2, the data are not normally distributed but they do meet the assumption of equal variance
+#Therefore, the Wilcoxon Rank Sum Text is appropriate for comparing these indices between protected and nonprotected groups
+
+wilcox.test(Inverse.Simpson.Index ~ habitat, data = diversity_indices)
+
+#p = 0.006799
+
+wilcox.test(Chao2 ~ habitat, data = diversity_indices)
+
+#p = 0.00006074
+```
+
+
+Now that we know a bit about parasite diversity, what about parasite prevalence? 
+
+```{r message = FALSE, warning=FALSE}
+#clear the air 
+
+rm(list = ls())
+
+#Read in the GMPD trimmed file, which includes the 34 hosts that are observed on and off of protected lands.
+gmpd_trimmed = readRDS(file = "gmpd_trimmed.rds")
+
+#Filter out the observations that do not have prevalence data. 
+#Unite host and parasite 
+gmpd_trimmed = gmpd_trimmed %>% filter(Prevalence != "NA") %>% unite("shared_host_parasite", HostCorrectedName, ParasiteCorrectedName, sep = "_")
+
+#Filter out the observations that have fewer than 15 hosts sampled. 
+gmpd_trimmed = gmpd_trimmed %>% filter(HostsSampled > 15) 
+
+#separate into protected & non-protected
+protected = gmpd_trimmed %>% filter(habitat == "protected")
+nonprotected = gmpd_trimmed %>% filter(habitat == "nonprotected")
+
+#Find the host:parasite pairs that are found in common between the two datasets.
+shared_host_parasite = intersect(protected$shared_host_parasite, nonprotected$shared_host_parasite)
+shared_host_parasite = as.data.frame(shared_host_parasite)
+
+#filter out the gmpd trimmed dataset to select only the host:parasite pairs on both habitats
+shared_host_parasite = left_join(shared_host_parasite, gmpd_trimmed, by = "shared_host_parasite")
+shared_host_parasite = shared_host_parasite  %>% select(shared_host_parasite, Prevalence, habitat)
+
+shared_host_parasite = plyr::ddply(shared_host_parasite, c("shared_host_parasite", "habitat"), summarize, mean_prevalence = mean(Prevalence), sd_prevalence = sd(Prevalence))
+
+shared_host_parasite %>% filter(mean_prevalence < 1.0) %>% ggplot(aes(x = habitat, y = mean_prevalence)) + 
+  geom_boxplot() +
+  ylab("Parasite Prevalence") + 
+  xlab("")
+
+shared_host_parasite %>% ggplot(aes(x = mean_prevalence)) + geom_histogram() + facet_wrap(~habitat)
+
+shared_host_parasite = shared_host_parasite %>% select(-sd_prevalence) %>% spread(habitat, c("mean_prevalence"))
+
+#Is this difference significant? 
+wilcox.test(shared_host_parasite$protected, shared_host_parasite$nonprotected, paired = TRUE)
+#No, p = 0.2
+
+#Let's take the difference between prevalence on and off of the protected lands. If they are NOT different, then we should have a histogram that is centered around zero.
+shared_host_parasite = shared_host_parasite %>% mutate(difference = protected-nonprotected)
+
+shared_host_parasite %>% ggplot(aes(x = difference)) + 
+  geom_histogram() + 
+  ylab("Count") + 
+  xlab("Difference")
+
+
+```
+
+
+Notes from Sonia and John: 
+
+#target of 10 different host:parasite combos
+#plasmodium parasites in great apes
+#ticks in reigndeer, within & without 
+#Parasite Diversity - Many host & parasite species 
+#Food supplementation on preserves, stress 
+#Where are they going to have more stress?
+#Some will do more well in different areas 
+
+#GMPD and meta-datasets 
+#Paper: Student-Led Claire Titlebomb GMPD & Diversity Estimators
+#Dozens of different ways 
+#Frequency of frequency tables - how many are represented by just one individual? 
+#Solutions: Cho-2 Estimator (formula & calculate) - Abundance-Based Coverage Estimator 
